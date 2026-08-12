@@ -4,9 +4,11 @@
  * 명령 추가는 COMMANDS 레지스트리에 항목을 더하는 것으로 끝난다(OCP).
  */
 import { CgvClient } from "./client.ts";
-import { CgvError } from "./core/errors.ts";
+import { CgvConfirmationRequiredError, CgvError } from "./core/errors.ts";
+import { maskSecret } from "./core/session.ts";
 import { todayInSeoul } from "./mappers/primitives.ts";
 import { renderTable, type Column } from "./cli/table.ts";
+import { parseSeatLocNo, type SeatRef, type ShowKey } from "./resources/seats.ts";
 import type { Movie, ScreenSchedule, Showtime, Theater } from "./types/domain.ts";
 
 interface Args {
@@ -180,7 +182,230 @@ const COMMANDS: Readonly<Record<string, Command>> = {
       printScreens(screens);
     },
   },
+
+  // ── 로그인 필요 구간 ─────────────────────────────────────────
+
+  login: {
+    usage: "cgv login <custNo> --cookie <쿠키>",
+    description: "브라우저 세션 쿠키를 주입해 로그인 (비밀번호 사용 안 함)",
+    run: async (client, args) => {
+      const custNo = required(args, 0, "custNo");
+      const cookie = args.flags["cookie"];
+      if (typeof cookie !== "string") {
+        throw new Error(
+          "--cookie 가 필요합니다.\n" +
+            "  1) 브라우저에서 cgv.co.kr 로그인\n" +
+            "  2) DevTools > Network > 아무 api 요청 > Request Headers 의 cookie 값 복사\n" +
+            "  3) custNo 는 같은 요청의 쿼리스트링(custNo=...)에서 확인\n" +
+            "  예: cgv login <custNo> --cookie 'SESSION=...; __cf_bm=...'",
+        );
+      }
+      const session = await client.auth.adopt(cookie, custNo);
+      process.stdout.write(
+        `로그인 저장됨: custNo=${session.custNo}, cookie=${maskSecret(session.cookie)}\n`,
+      );
+    },
+  },
+
+  whoami: {
+    usage: "cgv whoami",
+    description: "현재 세션 확인",
+    run: async (client, args) => {
+      const me = await client.auth.whoami();
+      emit(args, me, () => `custNo=${me.custNo}`);
+    },
+  },
+
+  logout: {
+    usage: "cgv logout",
+    description: "저장된 세션 삭제",
+    run: async (client) => {
+      client.auth.logout();
+      process.stdout.write("세션을 삭제했습니다.\n");
+    },
+  },
+
+  seatmap: {
+    usage: "cgv seatmap <영화ID> <극장ID> <YYYYMMDD> <상영관> <회차> [--area 001]",
+    description: "좌석 배치도 원본 조회 (부수효과 없음)",
+    run: async (client, args) => {
+      const show = showKeyFrom(args, 0);
+      const area = args.flags["area"];
+      const data = await client.seats.layout(show, typeof area === "string" ? area : undefined);
+      // 스키마 미확정이라 항상 JSON 으로 낸다.
+      process.stdout.write(`${JSON.stringify(data, null, 2)}\n`);
+    },
+  },
+
+  hold: {
+    usage: "cgv hold <영화ID> <극장ID> <YYYYMMDD> <상영관> <회차> <좌석> --confirm",
+    description: "[부수효과] 좌석 선점. 좌석은 K8@00100100170021 형식",
+    run: async (client, args) => {
+      requireConfirm(args, "좌석 선점");
+      const show = showKeyFrom(args, 0);
+      const seats = parseSeatArgs(required(args, 5, "좌석"), "001");
+
+      const hold = await client.seats.hold(show, seats);
+      process.stdout.write(
+        `선점 완료\n  발권번호(movAtktNo): ${hold.movAtktNo}\n` +
+          `  만료: ${hold.expiresAt ?? "(응답에서 확인 못함)"}\n` +
+          `  좌석: ${seats.map((s) => `${s.row}${s.number}`).join(", ")}\n\n` +
+          `취소하려면: cgv release ${hold.movAtktNo} ${args.positional.slice(0, 6).join(" ")} --confirm\n`,
+      );
+      if (args.flags["json"] === true) {
+        process.stdout.write(`${JSON.stringify(hold, null, 2)}\n`);
+      }
+    },
+  },
+
+  release: {
+    usage: "cgv release <movAtktNo> <영화ID> <극장ID> <YYYYMMDD> <상영관> <회차> <좌석> --confirm",
+    description: "[부수효과] 좌석 선점 해제",
+    run: async (client, args) => {
+      requireConfirm(args, "좌석 선점 해제");
+      const movAtktNo = required(args, 0, "movAtktNo");
+      const show = showKeyFrom(args, 1);
+      const seats = parseSeatArgs(required(args, 6, "좌석"), "001");
+
+      await client.seats.release({ movAtktNo, expiresAt: null, seats, show, raw: {} });
+      process.stdout.write("선점을 해제했습니다.\n");
+    },
+  },
+
+  paymethods: {
+    usage: "cgv paymethods <극장ID>",
+    description: "사용 가능한 결제수단 조회 (부수효과 없음)",
+    run: async (client, args) => {
+      const methods = await client.payment.methods(required(args, 0, "극장ID"));
+      emit(args, methods, () =>
+        renderTable(methods, [
+          { header: "코드", value: (m) => String(m.paykndCd ?? "") },
+          { header: "결제수단", value: (m) => String(m.paykndNm ?? "") },
+          { header: "그룹", value: (m) => String(m.paymGrpClsNm ?? "") },
+          { header: "노출", value: (m) => String(m.indctTgtYn ?? "") },
+        ]),
+      );
+    },
+  },
+
+  terms: {
+    usage: "cgv terms",
+    description: "결제 약관 조회 (부수효과 없음)",
+    run: async (client, args) => {
+      const terms = await client.payment.terms();
+      emit(args, terms, () =>
+        terms
+          .map((t) => `## ${t.stplTitNm ?? "(제목 없음)"}\n${String(t.stplCont ?? "").trim()}`)
+          .join("\n\n"),
+      );
+    },
+  },
+
+  paystatus: {
+    usage: "cgv paystatus <payToken>",
+    description: "토스 결제 승인 상태 폴링 (부수효과 없음)",
+    run: async (client, args) => {
+      const token = required(args, 0, "payToken");
+      const result = await client.payment.tossApprovalState(token);
+      emit(args, result, () => `state=${result.state}`);
+    },
+  },
+
+  checkout: {
+    usage:
+      "cgv checkout <극장ID> <금액> <상품명> --user-id <아이디> --user-name <이름> --phone <번호> --confirm",
+    description: "[부수효과] 결제번호 발급 + 토스 결제 예약 → 승인 URL 반환",
+    run: async (client, args) => {
+      requireConfirm(args, "결제 개시");
+
+      const theaterId = required(args, 0, "극장ID");
+      const amount = Number(required(args, 1, "금액"));
+      if (!Number.isInteger(amount) || amount <= 0) {
+        throw new Error(`금액이 올바르지 않습니다: ${args.positional[1]}`);
+      }
+      const goodsName = required(args, 2, "상품명");
+
+      const userId = args.flags["user-id"];
+      const userName = args.flags["user-name"];
+      const phone = args.flags["phone"];
+      if (typeof userId !== "string" || typeof userName !== "string" || typeof phone !== "string") {
+        throw new Error("--user-id, --user-name, --phone 이 모두 필요합니다.");
+      }
+
+      const today = todayInSeoul();
+      process.stderr.write(
+        `\n[확인] ${goodsName} / ${amount.toLocaleString("ko-KR")}원 / 극장 ${theaterId}\n` +
+          `결제 절차를 실제로 개시합니다.\n\n`,
+      );
+
+      const payment = await client.payment.createPaymentId({
+        theaterId,
+        amount,
+        goodsName,
+        goodsCount: 1,
+        userId,
+        userName,
+        saleDate: today,
+      });
+      process.stdout.write(`결제번호: ${payment.paymNo}\n`);
+
+      const ticket = await client.payment.reserveTossPay({
+        payment,
+        amount,
+        userPhone: phone,
+        expireDate: today,
+      });
+
+      process.stdout.write(
+        `PG 거래키: ${ticket.trxKey ?? "(응답에서 못 찾음)"}\n` +
+          `승인 URL: ${ticket.approvalUrl ?? "(응답에서 못 찾음 — --json 으로 원본 확인)"}\n\n` +
+          `다음 단계는 자동화할 수 없습니다:\n` +
+          `  1) 위 URL 을 브라우저에서 열기\n` +
+          `  2) 토스 앱에서 직접 결제 승인\n` +
+          `  3) cgv paystatus <payToken> 으로 상태 확인\n`,
+      );
+      if (args.flags["json"] === true) {
+        process.stdout.write(`${JSON.stringify(ticket, null, 2)}\n`);
+      }
+    },
+  },
 };
+
+/** 부수효과가 있는 작업은 --confirm 없이는 실행하지 않는다. */
+function requireConfirm(args: Args, action: string): void {
+  if (args.flags["confirm"] !== true) throw new CgvConfirmationRequiredError(action);
+}
+
+/** "K8,K9" 또는 "K8@00100100170021" 형식을 SeatRef 로 바꾼다. */
+function parseSeatArgs(spec: string, fallbackArea: string): SeatRef[] {
+  return spec.split(",").map((token) => {
+    const [label, locNo] = token.trim().split("@");
+    const matched = /^([A-Za-z]+)\s*(\d+)$/.exec(label ?? "");
+    if (matched === null) {
+      throw new Error(`좌석 형식이 잘못됐습니다: '${token}' (예: K8 또는 K8@00100100170021)`);
+    }
+    const row = (matched[1] ?? "").toUpperCase();
+    const number = matched[2] ?? "";
+    if (locNo === undefined) {
+      throw new Error(
+        `'${label}' 의 seatLocNo 를 알 수 없습니다. ` +
+          `'cgv seatmap' 으로 확인한 뒤 'K8@00100100170021' 형식으로 넘기세요. ` +
+          `(추측으로 좌석을 잠그면 위험하므로 자동 유추하지 않습니다. area=${fallbackArea})`,
+      );
+    }
+    return parseSeatLocNo(locNo, row, number);
+  });
+}
+
+function showKeyFrom(args: Args, offset: number): ShowKey {
+  return {
+    movieId: required(args, offset, "영화ID"),
+    theaterId: required(args, offset + 1, "극장ID"),
+    date: required(args, offset + 2, "날짜(YYYYMMDD)"),
+    screenId: required(args, offset + 3, "상영관번호"),
+    sequence: required(args, offset + 4, "회차"),
+  };
+}
 
 function required(args: Args, index: number, label: string): string {
   const value = args.positional[index];
@@ -197,12 +422,21 @@ function emit(args: Args, data: unknown, render: () => string): void {
 }
 
 function printHelp(): void {
-  process.stdout.write("CGV 예매 조회 CLI\n\n사용법:\n");
-  for (const command of Object.values(COMMANDS)) {
-    process.stdout.write(`  ${command.usage.padEnd(46)} ${command.description}\n`);
+  process.stdout.write("CGV 예매 CLI\n\n사용법:\n");
+  for (const [name, command] of Object.entries(COMMANDS)) {
+    const marker = SIDE_EFFECT_COMMANDS.has(name) ? " *" : "  ";
+    process.stdout.write(`${marker}${command.usage}\n     ${command.description}\n`);
   }
-  process.stdout.write("\n공통 플래그:\n  --json    결과를 JSON 으로 출력\n");
+  process.stdout.write(
+    "\n공통 플래그:\n" +
+      "  --json      결과를 JSON 으로 출력\n" +
+      "  --confirm   부수효과가 있는 작업(*) 실행 승인\n" +
+      "\n* 표시된 명령은 CGV 운영 데이터를 바꿉니다 (좌석 잠금 / 결제 개시).\n" +
+      "결제 최종 승인은 토스 앱에서 직접 해야 하며 CLI 로 자동화할 수 없습니다.\n",
+  );
 }
+
+const SIDE_EFFECT_COMMANDS = new Set(["hold", "release", "checkout"]);
 
 async function main(): Promise<void> {
   const [name, ...rest] = process.argv.slice(2);

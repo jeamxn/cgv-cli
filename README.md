@@ -81,7 +81,47 @@ pnpm dev seats 오디세이 용산아이파크몰
 | `cgv dates <영화ID\|제목> <극장ID\|극장명>` | 상영 날짜 목록 |
 | `cgv seats <영화ID\|제목> <극장ID\|극장명> [YYYYMMDD]` | 상영관별 회차 + 잔여좌석 |
 
+로그인이 필요한 명령:
+
+| 명령 | 부수효과 | 설명 |
+|---|---|---|
+| `cgv login <custNo> --cookie '<쿠키>'` | 세션 파일 기록 | 브라우저 쿠키 주입 |
+| `cgv whoami` / `cgv logout` | — | 세션 확인 / 삭제 |
+| `cgv seatmap <영화> <극장> <날짜> <상영관> <회차>` | 없음 | 좌석 배치도 |
+| `cgv paymethods <극장ID>` / `cgv terms` | 없음 | 결제수단 / 약관 |
+| `cgv hold ... <좌석> --confirm` | **좌석 잠금** | 좌석 선점 |
+| `cgv release ... --confirm` | 잠금 해제 | 선점 취소 |
+| `cgv checkout ... --confirm` | **결제 개시** | 토스 승인 URL 발급 |
+| `cgv paystatus <payToken>` | 없음 | 승인 상태 폴링 |
+
 모든 명령에 `--json` 사용 가능. 영화/극장 인자는 ID 또는 이름 둘 다 받는다(이름이면 자동 검색).
+
+## ⚠️ 결제는 자동화할 수 없다
+
+토스페이 최종 승인은 **사용자가 토스 앱에서 직접 하는 out-of-band 인증**이고, 승인 해시(`hashValue`)는 PG 서버가 생성한다. 캡처에서 `pay-approved-status` 가 10회 폴링된 것이 그 증거다.
+
+CLI 가 할 수 있는 최대치:
+
+```
+cgv checkout ... --confirm   →  토스 승인 URL 발급
+    ↓ (사람이 브라우저/토스 앱에서 승인)
+cgv paystatus <payToken>     →  승인됐는지 확인
+```
+
+`checkout` 과 `hold` 는 **실제로 돈이 나가거나 운영 좌석을 잠근다.** 그래서 `--confirm` 없이는 실행을 거부한다.
+
+## 로그인 방식 (비밀번호를 쓰지 않는 이유)
+
+CJ ONE SSO 는 비밀번호를 RSA 로 암호화해 전송하고, 공개키 발급 경로를 확인하지 못했다. 그래서 **비밀번호를 아예 다루지 않고** 브라우저 세션을 주입받는다.
+
+```bash
+# 1) 브라우저에서 cgv.co.kr 로그인
+# 2) DevTools > Network > 아무 api 요청 > Request Headers 의 cookie 복사
+# 3) custNo 는 같은 요청 쿼리스트링(custNo=...)에서 확인
+cgv login <custNo> --cookie 'SESSION=...; __cf_bm=...'
+```
+
+세션은 `~/.cgv-cli/session.json` 에 **0600** 으로 저장된다. 이 파일과 브라우저 캡처(HAR/cURL 덤프)는 실명·연락처·결제토큰을 담으므로 **절대 커밋하지 말 것**. `.gitignore` 에 등록해뒀다.
 
 ## Cloudflare 관련 주의사항 (중요)
 
