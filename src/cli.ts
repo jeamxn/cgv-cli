@@ -186,23 +186,29 @@ const COMMANDS: Readonly<Record<string, Command>> = {
   // ── 로그인 필요 구간 ─────────────────────────────────────────
 
   login: {
-    usage: "cgv login <custNo> --cookie <쿠키>",
-    description: "브라우저 세션 쿠키를 주입해 로그인 (비밀번호 사용 안 함)",
+    usage: "cgv login <아이디>            (비밀번호는 입력 프롬프트 또는 CGV_PASSWORD)",
+    description: "아이디/비밀번호 로그인 (RSA-OAEP). --cookie 로 세션 주입도 가능",
     run: async (client, args) => {
-      const custNo = required(args, 0, "custNo");
       const cookie = args.flags["cookie"];
-      if (typeof cookie !== "string") {
-        throw new Error(
-          "--cookie 가 필요합니다.\n" +
-            "  1) 브라우저에서 cgv.co.kr 로그인\n" +
-            "  2) DevTools > Network > 아무 api 요청 > Request Headers 의 cookie 값 복사\n" +
-            "  3) custNo 는 같은 요청의 쿼리스트링(custNo=...)에서 확인\n" +
-            "  예: cgv login <custNo> --cookie 'SESSION=...; __cf_bm=...'",
+
+      // 방식 2: 브라우저 세션 쿠키 주입 (`cgv login <custNo> --cookie '...'`)
+      if (typeof cookie === "string") {
+        const custNo = required(args, 0, "custNo");
+        const session = await client.auth.adopt(cookie, custNo);
+        process.stdout.write(
+          `세션 주입 완료: custNo=${session.custNo}, cookie=${maskSecret(session.cookie)}\n`,
         );
+        return;
       }
-      const session = await client.auth.adopt(cookie, custNo);
+
+      // 방식 1: 아이디/비밀번호
+      const userId = required(args, 0, "아이디");
+      const password = await readPassword();
+      if (password === "") throw new Error("비밀번호가 비어 있습니다.");
+
+      const session = await client.auth.login(userId, password);
       process.stdout.write(
-        `로그인 저장됨: custNo=${session.custNo}, cookie=${maskSecret(session.cookie)}\n`,
+        `로그인 완료: custNo=${session.custNo}, cookie=${maskSecret(session.cookie)}\n`,
       );
     },
   },
@@ -370,6 +376,54 @@ const COMMANDS: Readonly<Record<string, Command>> = {
     },
   },
 };
+
+/**
+ * 비밀번호를 읽는다. CLI 인자로는 절대 받지 않는다 — 셸 히스토리와
+ * `ps` 출력에 평문이 남기 때문이다.
+ * 우선순위: CGV_PASSWORD 환경변수 → TTY 프롬프트(에코 끔).
+ */
+async function readPassword(): Promise<string> {
+  const fromEnv = process.env["CGV_PASSWORD"];
+  if (typeof fromEnv === "string" && fromEnv !== "") return fromEnv;
+
+  if (!process.stdin.isTTY) {
+    throw new Error(
+      "비밀번호를 읽을 수 없습니다. CGV_PASSWORD 환경변수를 쓰거나 터미널에서 실행하세요.\n" +
+        "  (보안상 비밀번호는 명령행 인자로 받지 않습니다)",
+    );
+  }
+
+  process.stderr.write("비밀번호: ");
+  process.stdin.setRawMode(true);
+  process.stdin.resume();
+
+  return new Promise<string>((resolve) => {
+    let buffer = "";
+    const onData = (chunk: Buffer): void => {
+      const char = chunk.toString("utf8");
+      // Enter / Ctrl-C / Ctrl-D
+      if (char === "\r" || char === "\n" || char === "\u0004") {
+        process.stdin.setRawMode(false);
+        process.stdin.pause();
+        process.stdin.off("data", onData);
+        process.stderr.write("\n");
+        resolve(buffer);
+        return;
+      }
+      if (char === "\u0003") {
+        process.stdin.setRawMode(false);
+        process.stderr.write("\n");
+        process.exit(130);
+      }
+      if (char === "\u007f") {
+        buffer = buffer.slice(0, -1);
+        return;
+      }
+      buffer += char;
+    };
+    process.stdin.on("data", onData);
+  });
+}
 
 /** 부수효과가 있는 작업은 --confirm 없이는 실행하지 않는다. */
 function requireConfirm(args: Args, action: string): void {

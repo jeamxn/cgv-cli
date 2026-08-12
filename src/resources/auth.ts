@@ -7,6 +7,7 @@
 import type { HttpTransport } from "../core/transport.ts";
 import { normalizeCookieHeader, type Session, type SessionStore } from "../core/session.ts";
 import { CgvAuthError } from "../core/errors.ts";
+import { LoginFlow } from "../core/login.ts";
 import type { RawUserInfo } from "../types/raw-booking.ts";
 
 export class AuthResource {
@@ -16,6 +17,18 @@ export class AuthResource {
   constructor(http: HttpTransport, sessions: SessionStore) {
     this.http = http;
     this.sessions = sessions;
+  }
+
+  /**
+   * 아이디/비밀번호로 로그인한다 (RSA-OAEP 암호화).
+   *
+   * 비밀번호는 암호화 직후 폐기되며 저장·로깅하지 않는다.
+   * ⚠️ 비밀번호를 반복해서 틀리면 계정이 잠기고 캡차가 요구될 수 있다.
+   */
+  async login(userId: string, password: string): Promise<Session> {
+    const session = await new LoginFlow().run(userId, password);
+    this.sessions.save(session);
+    return session;
   }
 
   /**

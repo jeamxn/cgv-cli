@@ -11,6 +11,8 @@ export {
 } from "./core/errors.ts";
 export { FetchTransport, type HttpTransport, type Query } from "./core/transport.ts";
 export { CookieJar } from "./core/cookie-jar.ts";
+export { encryptPassword } from "./core/crypto.ts";
+export { CgvLoginError, LoginFlow } from "./core/login.ts";
 export {
   FileSessionStore,
   MemorySessionStore,

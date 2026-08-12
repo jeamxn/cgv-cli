@@ -110,16 +110,48 @@ cgv paystatus <payToken>     →  승인됐는지 확인
 
 `checkout` 과 `hold` 는 **실제로 돈이 나가거나 운영 좌석을 잠근다.** 그래서 `--confirm` 없이는 실행을 거부한다.
 
-## 로그인 방식 (비밀번호를 쓰지 않는 이유)
+## 로그인
 
-CJ ONE SSO 는 비밀번호를 RSA 로 암호화해 전송하고, 공개키 발급 경로를 확인하지 못했다. 그래서 **비밀번호를 아예 다루지 않고** 브라우저 세션을 주입받는다.
+두 가지 방식을 지원한다.
+
+### 1) 아이디/비밀번호 (RSA-OAEP)
 
 ```bash
-# 1) 브라우저에서 cgv.co.kr 로그인
-# 2) DevTools > Network > 아무 api 요청 > Request Headers 의 cookie 복사
-# 3) custNo 는 같은 요청 쿼리스트링(custNo=...)에서 확인
+cgv login <아이디>                    # 비밀번호는 프롬프트로 입력 (에코 꺼짐)
+CGV_PASSWORD='...' cgv login <아이디>  # 스크립트용
+```
+
+**비밀번호를 명령행 인자로 받지 않는다.** 셸 히스토리와 `ps` 출력에 평문이 남기 때문이다.
+
+CJ ONE 은 비밀번호를 RSA-2048 로 암호화해 보낸다. 프론트엔드 번들에서 확인한 스킴:
+
+| 항목 | 값 |
+|---|---|
+| 공개키 | 번들에 하드코딩 (`_next/static/chunks/3043-*.js`) |
+| scheme | `pkcs1_oaep` |
+| OAEP hash | **SHA-256** |
+| MGF1 hash | **SHA-1** |
+
+OAEP 와 MGF1 의 해시가 다른 비표준 조합이다. Node 의 `crypto.publicEncrypt` 는 `oaepHash` 하나로 둘 다 지정하므로 이 조합을 만들 수 없어, `src/core/crypto.ts` 에서 EME-OAEP(RFC 8017)를 직접 구현했다. node-forge 를 넣으면 간단하지만 런타임 의존성 0 원칙을 지켰다.
+
+검증 방법 — 실계정을 건드리지 않는 대조 실험:
+
+| 입력 | 서버 응답 | 해석 |
+|---|---|---|
+| 이 구현의 암호문 | `-1005 ID 혹은 비밀번호가 일치하지 않습니다` | **복호화 성공** |
+| 무작위 256바이트 | `Internal Server Error` | 복호화 실패 |
+
+⚠️ 비밀번호를 반복해서 틀리면 **계정이 잠기고 캡차가 요구된다.** 로그인 페이지에 `captcha` 입력이 존재하며, 캡차가 걸리면 이 방식은 실패한다 — 그때는 아래 2)를 쓴다.
+
+### 2) 브라우저 세션 쿠키 주입
+
+```bash
+# DevTools > Network > 아무 api 요청 > Request Headers 의 cookie 복사
+# custNo 는 같은 요청 쿼리스트링(custNo=...)에서 확인
 cgv login <custNo> --cookie 'SESSION=...; __cf_bm=...'
 ```
+
+캡차·2FA 영향을 받지 않는 확실한 우회 경로다.
 
 세션은 `~/.cgv-cli/session.json` 에 **0600** 으로 저장된다. 이 파일과 브라우저 캡처(HAR/cURL 덤프)는 실명·연락처·결제토큰을 담으므로 **절대 커밋하지 말 것**. `.gitignore` 에 등록해뒀다.
 
