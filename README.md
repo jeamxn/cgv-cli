@@ -1,4 +1,4 @@
-# cgv-booking-client
+# cgv-cli
 
 CGV 예매 플로우(첫 접속 → 영화 → 영화관 → 날짜 → 상영관별 잔여좌석)를 감싼 TypeScript 클라이언트. 런타임 의존성 0.
 
@@ -26,7 +26,7 @@ pnpm build         # dist/ 생성
 ## 라이브러리
 
 ```ts
-import { CgvClient } from "cgv-booking-client";
+import { CgvClient } from "cgv-cli";
 
 const cgv = new CgvClient();
 
