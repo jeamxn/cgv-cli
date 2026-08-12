@@ -83,6 +83,9 @@ export class AuthResource {
     if (raw === null || raw === undefined) {
       throw new CgvAuthError("세션이 만료된 것으로 보입니다.");
     }
-    return { custNo: raw.custNo ?? session.custNo };
+    // searchUserInfo 는 custNo 를 AES 로 감싸 돌려준다. 숫자가 아니면 저장된 값을 쓴다.
+    const returned = raw.custNo;
+    const usable = typeof returned === "string" && /^\d+$/.test(returned) ? returned : null;
+    return { custNo: usable ?? session.custNo };
   }
 }

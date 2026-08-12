@@ -87,11 +87,21 @@ function keyParts(): PublicKeyParts {
 
 /**
  * 로그인 폼의 비밀번호를 CGV 서버가 기대하는 형식(base64)으로 암호화한다.
+ *
+ * 프론트엔드 코드(chunk 305)의 실제 구성:
+ *   password: rsa.encrypt( CryptoJS.enc.Hex.stringify( CryptoJS.SHA256(원문) ) )
+ *
+ * 즉 **원문이 아니라 SHA-256 hex 다이제스트(64자)** 를 RSA 로 감싼다.
+ * 원문을 그대로 암호화하면 서버가 복호화에는 성공하지만 비밀번호가 불일치한다.
+ *
  * 평문은 이 함수 밖으로 나가지 않으며 어디에도 보관하지 않는다.
  */
 export function encryptPassword(plain: string): string {
   const { n, e, k } = keyParts();
-  const message = Buffer.from(plain, "utf8");
+  // 1단계: SHA-256 hex (소문자 64자)
+  const digest = createHash("sha256").update(plain, "utf8").digest("hex");
+  // 2단계: RSA-OAEP
+  const message = Buffer.from(digest, "utf8");
 
   const maxLen = k - 2 * H_LEN - 2;
   if (message.length > maxLen) {

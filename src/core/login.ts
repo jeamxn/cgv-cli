@@ -71,20 +71,28 @@ export class LoginFlow {
       );
     }
 
-    const custNo = findCustNo(login.data);
-    if (custNo === null) {
-      throw new CgvLoginError(
-        "로그인은 성공했지만 응답에서 custNo 를 찾지 못했습니다. " +
-          "`--cookie` 방식으로 대신 로그인하세요.",
-      );
+    // accessToken 은 Set-Cookie 가 아니라 응답 본문으로 온다.
+    // 프론트엔드도 이것을 직접 쿠키로 심는다(chunk 305: td("accessToken", ...)).
+    const accessToken = (login.data as { accessToken?: unknown } | null)?.accessToken;
+    if (typeof accessToken !== "string" || accessToken === "") {
+      throw new CgvLoginError("로그인 응답에서 accessToken 을 찾지 못했습니다.");
     }
+    this.jar.absorb([`accessToken=${accessToken}`]);
 
-    // 세션 확립에 필요한 후속 호출. 실패해도 로그인 자체는 유효할 수 있어 치명적으로 다루지 않는다.
-    await this.tryPost(`${WEB}/api/v1/member/usgStpl/searchMemAgreeUser`, {
+    // custNo 는 로그인 응답이 아니라 이 호출의 결과로 온다.
+    const agree = await this.post(`${WEB}/api/v1/member/usgStpl/searchMemAgreeUser`, {
       coCd: this.config.coCd,
       userId,
     });
-    await this.tryPost(`${OIDC}/common/auth/getChkInfo`, { coCd: this.config.coCd, userId });
+    const custNo = readCustNo(agree.data);
+    if (custNo === null) {
+      throw new CgvLoginError(
+        "로그인은 성공했지만 custNo 를 확보하지 못했습니다. `--cookie` 방식으로 대신 로그인하세요.",
+        agree.statusCode ?? null,
+      );
+    }
+
+    // 부가 단계. 실패(-1006 등)해도 세션은 이미 유효하므로 치명적으로 다루지 않는다.
     await this.tryPost(`${OIDC}/cjone/cjoneLoginAftCgv`, {
       coCd: this.config.coCd,
       userId,
@@ -93,7 +101,7 @@ export class LoginFlow {
 
     const cookie = this.jar.header();
     if (cookie === null) {
-      throw new CgvLoginError("로그인 응답에서 세션 쿠키를 받지 못했습니다.");
+      throw new CgvLoginError("세션 쿠키를 만들지 못했습니다.");
     }
 
     return { custNo, cookie, savedAt: new Date().toISOString() };
@@ -153,21 +161,14 @@ export class LoginFlow {
   }
 }
 
-/** 응답 어디에 custNo 가 들어있는지 확정하지 못해 얕게 탐색한다. */
-function findCustNo(data: unknown): string | null {
+/**
+ * searchMemAgreeUser 응답에서 CGV 고객번호를 꺼낸다.
+ * 이 응답에는 이름·생년월일·연락처도 함께 오지만 custNo 외에는 읽지 않는다.
+ */
+function readCustNo(data: unknown): string | null {
   if (data === null || typeof data !== "object") return null;
-  const record = data as Record<string, unknown>;
-
-  for (const key of ["custNo", "userNo", "itgrCustNo"]) {
-    const value = record[key];
-    if (typeof value === "string" && /^\d+$/.test(value)) return value;
-    if (typeof value === "number") return String(value);
-  }
-  for (const value of Object.values(record)) {
-    if (value !== null && typeof value === "object") {
-      const nested = findCustNo(value);
-      if (nested !== null) return nested;
-    }
-  }
+  const value = (data as { custNo?: unknown }).custNo;
+  if (typeof value === "string" && /^\d+$/.test(value)) return value;
+  if (typeof value === "number" && Number.isInteger(value)) return String(value);
   return null;
 }
