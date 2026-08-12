@@ -5,6 +5,7 @@
 import { CookieJar } from "./cookie-jar.ts";
 import { DEFAULT_CONFIG, type CgvConfig } from "./config.ts";
 import { CgvApiError, CgvBlockedError, CgvNetworkError } from "./errors.ts";
+import type { SessionStore } from "./session.ts";
 import type { RawEnvelope } from "../types/raw.ts";
 
 export type QueryValue = string | number | boolean | undefined | null;
@@ -13,6 +14,8 @@ export type Query = Readonly<Record<string, QueryValue>>;
 export interface HttpTransport {
   /** CGV 응답 봉투를 풀어 data 만 돌려준다. */
   get<T>(path: string, query?: Query): Promise<T>;
+  /** JSON 본문 POST. 응답 봉투를 풀어 data 만 돌려준다. */
+  post<T>(path: string, body: unknown, query?: Query): Promise<T>;
 }
 
 const CF_COOKIE = "__cf_bm";
@@ -22,16 +25,31 @@ export class FetchTransport implements HttpTransport {
   /** 동시 호출 시 부트스트랩이 중복되지 않도록 하는 single-flight 슬롯 */
   private bootstrapping: Promise<void> | null = null;
   private readonly config: CgvConfig;
+  /** 로그인 세션(쿠키) 공급자. 없으면 비로그인 모드. */
+  private readonly sessions: SessionStore | null;
 
-  constructor(config: CgvConfig = DEFAULT_CONFIG) {
+  constructor(config: CgvConfig = DEFAULT_CONFIG, sessions: SessionStore | null = null) {
     this.config = config;
+    this.sessions = sessions;
   }
 
   async get<T>(path: string, query: Query = {}): Promise<T> {
-    const url = this.buildUrl(path, query);
-    const response = await this.requestWithRetry(url);
-    const envelope = (await response.json()) as RawEnvelope<T>;
+    return this.unwrap(path, await this.requestWithRetry(this.buildUrl(path, query)));
+  }
 
+  async post<T>(path: string, body: unknown, query: Query = {}): Promise<T> {
+    const url = this.buildUrl(path, query);
+    return this.unwrap(
+      path,
+      await this.requestWithRetry(url, {
+        method: "POST",
+        body: JSON.stringify(body ?? {}),
+      }),
+    );
+  }
+
+  private async unwrap<T>(url: string, response: Response): Promise<T> {
+    const envelope = (await response.json()) as RawEnvelope<T>;
     if (envelope.statusCode !== 0) {
       throw new CgvApiError(envelope.statusCode, envelope.statusMessage, url);
     }
@@ -50,7 +68,7 @@ export class FetchTransport implements HttpTransport {
   }
 
   /** 403 이면 쿠키를 버리고 재부트스트랩 후 재시도한다. */
-  private async requestWithRetry(url: string): Promise<Response> {
+  private async requestWithRetry(url: string, init: RequestInit = {}): Promise<Response> {
     const maxAttempts = this.config.maxRetries + 1;
     let lastReason = "unknown";
     let lastCause: unknown;
@@ -62,7 +80,8 @@ export class FetchTransport implements HttpTransport {
       let response: Response;
       try {
         response = await fetch(url, {
-          headers: this.apiHeaders(),
+          ...init,
+          headers: this.apiHeaders(init.method === "POST"),
           redirect: "follow",
           signal: AbortSignal.timeout(this.config.timeoutMs),
         });
@@ -126,7 +145,7 @@ export class FetchTransport implements HttpTransport {
     this.jar.absorb(response.headers.getSetCookie());
   }
 
-  private apiHeaders(): Record<string, string> {
+  private apiHeaders(json = false): Record<string, string> {
     const headers: Record<string, string> = {
       accept: "application/json",
       "accept-language": "ko-KR",
@@ -138,8 +157,16 @@ export class FetchTransport implements HttpTransport {
       "sec-fetch-site": "same-origin",
       "user-agent": this.config.userAgent,
     };
-    const cookie = this.jar.header();
-    if (cookie !== null) headers["cookie"] = cookie;
+    if (json) headers["content-type"] = "application/json";
+
+    // Cloudflare 쿠키 + 로그인 세션 쿠키를 합친다. 세션이 뒤에 와야 덮어쓰기가 안전하다.
+    const parts: string[] = [];
+    const cfCookie = this.jar.header();
+    if (cfCookie !== null) parts.push(cfCookie);
+    const session = this.sessions?.load();
+    if (session !== null && session !== undefined) parts.push(session.cookie);
+    if (parts.length > 0) headers["cookie"] = parts.join("; ");
+
     return headers;
   }
 
