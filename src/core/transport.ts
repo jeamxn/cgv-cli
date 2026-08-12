@@ -4,7 +4,7 @@
  */
 import { CookieJar } from "./cookie-jar.ts";
 import { DEFAULT_CONFIG, type CgvConfig } from "./config.ts";
-import { CgvApiError, CgvBlockedError, CgvNetworkError } from "./errors.ts";
+import { CgvApiError, CgvBlockedError, CgvError, CgvNetworkError } from "./errors.ts";
 import type { SessionStore } from "./session.ts";
 import type { RawEnvelope } from "../types/raw.ts";
 
@@ -107,7 +107,9 @@ export class FetchTransport implements HttpTransport {
       }
 
       // 그 외 4xx/5xx 는 재시도 가치가 없다고 보고 즉시 실패시킨다.
-      throw new CgvNetworkError(url, `HTTP ${response.status} ${response.statusText}`);
+      // 단 CGV 는 4xx 본문에도 사람이 읽을 사유를 담아준다
+      // ("이미 다른 고객이 예매 중인 좌석입니다" 등). 버리지 않는다.
+      throw await describeFailure(url, response);
     }
 
     if (blocked) throw new CgvBlockedError(url, maxAttempts);
@@ -190,6 +192,32 @@ export class FetchTransport implements HttpTransport {
   private async backoff(attempt: number): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, this.config.retryDelayMs * attempt));
   }
+}
+
+/**
+ * 실패 응답을 사람이 읽을 수 있는 에러로 바꾼다.
+ * 본문에 statusMessage 가 있으면 그것을 쓰고, 없을 때만 HTTP 상태로 떨어진다.
+ */
+async function describeFailure(url: string, response: Response): Promise<CgvError> {
+  let body = "";
+  try {
+    body = await response.text();
+  } catch {
+    /* 본문을 못 읽어도 상태코드로는 보고할 수 있다 */
+  }
+
+  try {
+    const envelope = JSON.parse(body) as { statusCode?: unknown; statusMessage?: unknown };
+    if (typeof envelope.statusMessage === "string" && envelope.statusMessage !== "") {
+      const code =
+        typeof envelope.statusCode === "number" ? envelope.statusCode : response.status;
+      return new CgvApiError(code, envelope.statusMessage, url);
+    }
+  } catch {
+    /* JSON 이 아니면 아래로 */
+  }
+
+  return new CgvNetworkError(url, `HTTP ${response.status} ${response.statusText}`);
 }
 
 /** 세션 쿠키 문자열에서 accessToken 값을 꺼낸다. 없으면 null. */

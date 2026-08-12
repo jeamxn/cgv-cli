@@ -25,11 +25,13 @@ export {
 export { AuthResource } from "./resources/auth.ts";
 export {
   SeatsResource,
-  parseSeatLocNo,
   type SeatHold,
   type SeatRef,
+  type SeatSpec,
   type ShowKey,
 } from "./resources/seats.ts";
+export { IdentityResource, type Identity } from "./resources/identity.ts";
+export { CheckoutResource, type CheckoutResult } from "./resources/checkout.ts";
 export {
   PaymentResource,
   TOSS_PAY,

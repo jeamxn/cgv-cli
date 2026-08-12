@@ -131,8 +131,11 @@ export class CheckoutResource {
     };
   }
 
-  /** 좌석 1매 가격. 부수효과 없음. */
-  async price(show: ShowKey, seat: SeatRef): Promise<number> {
+  /**
+   * 좌석별 가격. 부수효과 없음.
+   * 같은 회차라도 좌석마다 다를 수 있어(4DX PRIME석 등) 좌석 순서대로 돌려준다.
+   */
+  async prices(show: ShowKey, seats: readonly SeatRef[]): Promise<number[]> {
     const raw = await this.http.post<RawSeatPrice[] | RawSeatPrice>(
       "/booking/searchMovAtktSeatPrcList",
       {
@@ -145,26 +148,30 @@ export class CheckoutResource {
         rtctlScopCd: RTCTL_SCOPE_WEB,
         prcrulDivCd: "01",
         sachlTypCd: "01",
-        prodBnduList: [{ prodBnduCd: "01", prodBnduQty: 1 }],
-        seatList: [
-          {
-            seatLocNo: seat.seatLocNo,
-            szoneKindCd: "01",
-            stkndCd: "01",
-            seatSalfrmCd: "01",
-            prodBnduCd: "01",
-          },
-        ],
+        prodBnduList: [{ prodBnduCd: "01", prodBnduQty: seats.length }],
+        seatList: seats.map((seat) => ({
+          seatLocNo: seat.seatLocNo,
+          szoneKindCd: seat.szoneKindCd,
+          stkndCd: seat.stkndCd,
+          seatSalfrmCd: seat.seatSalfrmCd,
+          prodBnduCd: "01",
+        })),
         zoneGroupYn: "N",
       },
     );
 
-    const row = first<RawSeatPrice>(raw);
-    const amount = typeof row?.salAmt === "number" ? row.salAmt : 0;
-    if (amount <= 0) {
-      throw new Error(`좌석 가격을 확인하지 못했습니다. 응답: ${JSON.stringify(raw).slice(0, 200)}`);
-    }
-    return amount;
+    const rows = Array.isArray(raw) ? raw : [raw];
+    return seats.map((seat) => {
+      const row = rows.find((item) => item?.seatLocNo === seat.seatLocNo);
+      const amount = typeof row?.salAmt === "number" ? row.salAmt : 0;
+      if (amount <= 0) {
+        throw new Error(
+          `${seat.row}${seat.number} 의 가격을 확인하지 못했습니다. ` +
+            `응답: ${JSON.stringify(raw).slice(0, 200)}`,
+        );
+      }
+      return amount;
+    });
   }
 
   /** 토스페이 결제수단 객체를 그대로 가져온다. 하드코딩하지 않는다. */
@@ -186,26 +193,29 @@ export class CheckoutResource {
    */
   async start(args: {
     readonly show: ShowKey;
-    readonly seat: SeatRef;
+    readonly seats: readonly SeatRef[];
     readonly movAtktNo: string;
   }): Promise<CheckoutResult> {
-    const { show, seat, movAtktNo } = args;
+    const { show, seats, movAtktNo } = args;
+    if (seats.length === 0) throw new Error("결제할 좌석이 없습니다.");
 
-    const [identity, meta, price, payMethod] = await Promise.all([
+    const [identity, meta, prices, payMethod] = await Promise.all([
       this.identity.resolve(),
       this.meta(show),
-      this.price(show, seat),
+      this.prices(show, seats),
       this.tossMethod(show.theaterId),
     ]);
 
+    const price = prices.reduce((sum, amount) => sum + amount, 0);
     const saleDate = today();
+    // 좌석이 여러 개면 CGV 도 대표 상품명 하나만 쓴다.
     const goodsName = `${meta.movNm} ${meta.siteNm}`;
 
     const prepare = {
       theaterId: show.theaterId,
       amount: price,
       goodsName,
-      goodsCount: 1,
+      goodsCount: seats.length,
       userId: identity.plainUserId,
       userName: identity.plainUserName,
       saleDate,
@@ -221,9 +231,9 @@ export class CheckoutResource {
       identity,
       show,
       meta,
-      seat,
+      seats,
       movAtktNo,
-      price,
+      prices,
       paymNo: payment.paymNo,
       paymVrifyNo: payment.paymVrifyNo,
       payMethod,

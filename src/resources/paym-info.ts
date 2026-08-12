@@ -42,10 +42,10 @@ export interface PaymInfoInput {
   readonly identity: Identity;
   readonly show: ShowKey;
   readonly meta: ShowMeta;
-  readonly seat: SeatRef;
+  readonly seats: readonly SeatRef[];
   readonly movAtktNo: string;
-  /** 좌석 1매 가격 */
-  readonly price: number;
+  /** 좌석과 같은 순서의 매당 가격 */
+  readonly prices: readonly number[];
   readonly paymNo: string;
   readonly paymVrifyNo: string;
   /** searchGroupedPaymdList 에서 고른 결제수단 객체를 통째로 넣는다. */
@@ -72,8 +72,12 @@ export function splitVat(amount: number): { readonly vat: number; readonly tax: 
   return { vat, tax: amount - vat };
 }
 
-function buildTicketProducts(input: PaymInfoInput): Record<string, unknown> {
-  const { show, meta, seat, price } = input;
+function buildTicketProducts(
+  input: PaymInfoInput,
+  seat: SeatRef,
+  price: number,
+): Record<string, unknown> {
+  const { show, meta } = input;
   return {
     scnYmd: show.date,
     scnTm: meta.scnsrtTm,
@@ -85,12 +89,12 @@ function buildTicketProducts(input: PaymInfoInput): Record<string, unknown> {
     szoneCd: seat.szoneNo,
     szoneNm: "일반존",
     szoneNo: seat.szoneNo,
-    stkndCd: "01",
-    stkndNm: "일반석",
+    stkndCd: seat.stkndCd,
+    stkndNm: seat.stkndNm,
     seatAreaNo: seat.seatAreaNo,
-    szoneKindCd: "01",
+    szoneKindCd: seat.szoneKindCd,
     szoneKindNm: "일반",
-    seatSalfrmCd: "01",
+    seatSalfrmCd: seat.seatSalfrmCd,
     siteGradCd: meta.siteGradCd,
     tcscnsGradCd: meta.tcscnsGradCd,
     videoAddexpCd: null,
@@ -128,11 +132,14 @@ function buildTicketProducts(input: PaymInfoInput): Record<string, unknown> {
   };
 }
 
-function buildMov(input: PaymInfoInput): Record<string, unknown> {
-  const { show, meta, price, identity } = input;
-  const poster = posterUrl(show.movieId);
-
-  const sellProduct = {
+function buildSellProduct(
+  input: PaymInfoInput,
+  seat: SeatRef,
+  price: number,
+  poster: string,
+): Record<string, unknown> {
+  const { show, meta } = input;
+  return {
     bzplcTypCd: "01",
     dblfrNo: null,
     dblfrYn: null,
@@ -155,7 +162,7 @@ function buildMov(input: PaymInfoInput): Record<string, unknown> {
     selBzplcNo: meta.bzplcNo,
     selSiteNo: show.theaterId,
     selStoNo: meta.stoNo,
-    ticketProducts: buildTicketProducts(input),
+    ticketProducts: buildTicketProducts(input, seat, price),
     generalProducts: null,
     cmpProductsList: null,
     speclIndctTypCd: "01",
@@ -163,6 +170,15 @@ function buildMov(input: PaymInfoInput): Record<string, unknown> {
     hotdlNo: null,
     hotdlTypCd: "02",
   };
+}
+
+function buildMov(input: PaymInfoInput): Record<string, unknown> {
+  const { show, meta, seats, prices, identity } = input;
+  const poster = posterUrl(show.movieId);
+  const total = prices.reduce((sum, amount) => sum + amount, 0);
+  // 상위 블록은 대표 좌석 기준으로 채운다. 좌석별 차이는 sellProductsList 에 담긴다.
+  const head = seats[0];
+  if (head === undefined) throw new Error("좌석이 비어 있습니다.");
 
   return {
     cratgClsCd: meta.cratgClsCd,
@@ -187,9 +203,9 @@ function buildMov(input: PaymInfoInput): Record<string, unknown> {
     scnSseq: show.sequence,
     sachlTypCd: "01",
     prodBnduCd: "01",
-    bnduQty: "1",
-    szoneKindCd: "01",
-    stkndCd: "01",
+    bnduQty: String(seats.length),
+    szoneKindCd: head.szoneKindCd,
+    stkndCd: head.stkndCd,
     amountTotal: "0",
     szoneExpTm: "",
     prcrulDivCd: "01",
@@ -210,9 +226,11 @@ function buildMov(input: PaymInfoInput): Record<string, unknown> {
     prdtypCd: "01",
     bzplcTypCd: "01",
     itgrScnsGradCd: meta.itgrScnsGradCd,
-    sellProductsList: [sellProduct],
+    sellProductsList: seats.map((seat, index) =>
+      buildSellProduct(input, seat, prices[index] ?? 0, poster),
+    ),
     custNo: identity.cust.custNo,
-    sumSalAmt: price,
+    sumSalAmt: total,
     siteNo: show.theaterId,
     cxprdYn: "N",
     ticketProducts: [],
@@ -220,14 +238,17 @@ function buildMov(input: PaymInfoInput): Record<string, unknown> {
     cmpProductsList: null,
     koficMovfCd: meta.koficMovfCd,
     prodImg: poster,
-    movDtlKindsList: [{ cratgClsNm: "일반", atktQty: "1", prodBnduCd: "01" }],
+    movDtlKindsList: [
+      { cratgClsNm: "일반", atktQty: String(seats.length), prodBnduCd: "01" },
+    ],
     discountDatas: [null],
   };
 }
 
 /** 결제 저장 API 에 실을 JSON 문자열을 만든다. */
 export function buildPaymInfoCont(input: PaymInfoInput): string {
-  const { identity, meta, price } = input;
+  const { identity, meta, prices } = input;
+  const price = prices.reduce((sum, amount) => sum + amount, 0);
   const { vat, tax } = splitVat(price);
 
   const payload = {
@@ -307,7 +328,7 @@ export function buildPaymInfoCont(input: PaymInfoInput): string {
     redirectUrl: input.redirectUrl,
     payType: "mov",
     goodsName: input.goodsName,
-    goodsCnt: "1",
+    goodsCnt: String(input.seats.length),
     goodsType: "N",
     imdtlOrdYn: "N",
     traceType: "0",

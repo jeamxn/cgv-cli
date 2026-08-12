@@ -9,10 +9,10 @@ import { RTCTL_SCOPE_WEB } from "../core/config.ts";
 import type { HttpTransport } from "../core/transport.ts";
 import type { AuthResource } from "./auth.ts";
 import type {
+  RawSeat,
   RawSeatData,
   RawSeatHoldItem,
   RawSeatHoldResult,
-  RawSeatPriceRequest,
 } from "../types/raw-booking.ts";
 
 /** 회차를 특정하는 키. */
@@ -27,7 +27,13 @@ export interface ShowKey {
   readonly sequence: string;
 }
 
-/** 선점 대상 좌석. seatLocNo 만 알면 나머지는 파싱으로 채울 수 있다. */
+/**
+ * 선점 대상 좌석.
+ *
+ * 값은 전부 배치도 응답에서 읽는다. 추측하지 않는다 —
+ * IMAX 는 존이 둘(szoneKindCd 01/02)이고 4DX 는 PRIME석(stkndCd 12)이 섞여 있어
+ * 일반관 기준으로 넘겨짚으면 가격과 좌석이 어긋난다.
+ */
 export interface SeatRef {
   readonly seatLocNo: string;
   readonly row: string;
@@ -35,6 +41,19 @@ export interface SeatRef {
   readonly sbordNo: string;
   readonly seatAreaNo: string;
   readonly szoneNo: string;
+  readonly szoneKindCd: string;
+  readonly stkndCd: string;
+  readonly seatSalfrmCd: string;
+  /** 표시용 좌석 종류명 (일반석 / PRIME석 등) */
+  readonly stkndNm: string;
+}
+
+/** 사용자가 지정한 좌석. 좌석명만 주거나 seatLocNo 까지 줄 수 있다. */
+export interface SeatSpec {
+  readonly row: string;
+  readonly number: string;
+  /** 있으면 이 값으로 배치도에서 찾는다. 없으면 행+번호로 찾는다. */
+  readonly seatLocNo?: string;
 }
 
 export interface SeatHold {
@@ -48,27 +67,32 @@ export interface SeatHold {
   readonly raw: RawSeatHoldResult;
 }
 
-/**
- * seatLocNo 14자리 = sbordNo(3) + seatAreaNo(3) + 행(4) + 열(4)
- * 실측: "00100100170021" → sbord 001, area 001, K행 8번
- * 행/열 숫자와 표시용 행문자(K)의 대응은 확인되지 않아, 행문자는 호출자가 넘겨야 한다.
- */
-export function parseSeatLocNo(
-  seatLocNo: string,
-  row: string,
-  number: string,
-  szoneNo = "01001",
-): SeatRef {
-  if (!/^\d{14}$/.test(seatLocNo)) {
-    throw new Error(`seatLocNo 는 숫자 14자리여야 합니다: ${seatLocNo}`);
-  }
+/** 배치도 응답에서 좌석 배열만 꺼낸다. 구역이 여러 개면 전부 합친다. */
+function flattenSeats(layout: unknown): RawSeat[] {
+  const items = (layout as { items?: unknown[] })?.items;
+  if (!Array.isArray(items)) return [];
+  return items.flatMap((item) => {
+    const seats = (item as { seats?: unknown[] })?.seats;
+    return Array.isArray(seats) ? (seats as RawSeat[]) : [];
+  });
+}
+
+function text(value: unknown, fallback = ""): string {
+  return typeof value === "string" && value !== "" ? value : fallback;
+}
+
+function toSeatRef(raw: RawSeat): SeatRef {
   return {
-    seatLocNo,
-    row,
-    number,
-    sbordNo: seatLocNo.slice(0, 3),
-    seatAreaNo: seatLocNo.slice(3, 6),
-    szoneNo,
+    seatLocNo: text(raw.seatLocNo),
+    row: text(raw.seatRowNm),
+    number: text(raw.seatNo),
+    sbordNo: text(raw.sbordNo),
+    seatAreaNo: text(raw.seatAreaNo),
+    szoneNo: text(raw.szoneNo),
+    szoneKindCd: text(raw.szoneKindCd),
+    stkndCd: text(raw.stkndCd),
+    seatSalfrmCd: text(raw.seatSalfrmCd),
+    stkndNm: text(raw.stkndNm, "일반석"),
   };
 }
 
@@ -108,6 +132,67 @@ export class SeatsResource {
     });
   }
 
+  /**
+   * 사용자가 지정한 좌석을 배치도와 대조해 실제 속성을 채운다. 부수효과 없음.
+   * 이미 팔린 좌석이면 선점 전에 여기서 막는다.
+   */
+  async resolve(
+    show: ShowKey,
+    specs: readonly SeatSpec[],
+    /** 해제(release)처럼 이미 잡힌 좌석을 다뤄야 할 때만 켠다. */
+    options: { readonly includeSold?: boolean } = {},
+  ): Promise<SeatRef[]> {
+    if (specs.length === 0) throw new Error("좌석을 지정하세요.");
+
+    const seats = flattenSeats(await this.layout(show));
+    if (seats.length === 0) {
+      throw new Error("좌석 배치도를 읽지 못했습니다. 상영관·회차를 확인하세요.");
+    }
+
+    const picked: SeatRef[] = [];
+    for (const spec of specs) {
+      const label = `${spec.row}${spec.number}`;
+      const matches =
+        spec.seatLocNo === undefined
+          ? seats.filter(
+              (seat) =>
+                text(seat.seatRowNm).toUpperCase() === spec.row && text(seat.seatNo) === spec.number,
+            )
+          : seats.filter((seat) => text(seat.seatLocNo) === spec.seatLocNo);
+
+      const found = matches[0];
+      if (found === undefined) {
+        throw new Error(`배치도에 없는 좌석입니다: ${label}`);
+      }
+      // 같은 좌석명이 구역마다 따로 있는 상영관이 있다(SCREENX 의 PRIVATE BOX 등).
+      // 어느 쪽인지 모른 채 좌석을 잠그면 안 되므로 여기서 멈춘다.
+      if (matches.length > 1) {
+        const candidates = matches
+          .map(
+            (seat) =>
+              `    ${label}@${text(seat.seatLocNo)}  ${text(seat.stkndNm, "일반석")}` +
+              `${text((seat as { movAtktNo?: unknown }).movAtktNo) === "" ? "" : " (판매됨)"}`,
+          )
+          .join("\n");
+        throw new Error(
+          `'${label}' 이 이 상영관에 ${matches.length}개 있습니다. seatLocNo 까지 지정하세요:\n${candidates}`,
+        );
+      }
+      if (
+        options.includeSold !== true &&
+        text((found as { movAtktNo?: unknown }).movAtktNo) !== ""
+      ) {
+        throw new Error(`이미 판매된 좌석입니다: ${label}`);
+      }
+      const ref = toSeatRef(found);
+      if (picked.some((seat) => seat.seatLocNo === ref.seatLocNo)) {
+        throw new Error(`좌석이 중복 지정됐습니다: ${label}`);
+      }
+      picked.push(ref);
+    }
+    return picked;
+  }
+
   /** 예매 가능 여부 사전 확인. 부수효과 없음. */
   async precheck(show: ShowKey): Promise<unknown> {
     const session = this.auth.require();
@@ -120,31 +205,6 @@ export class SeatsResource {
       dblfrRpsntYn: "N",
       cxprdYn: "N",
     });
-  }
-
-  /** 좌석 가격 조회. 부수효과 없음. */
-  async price(show: ShowKey, seats: readonly SeatRef[]): Promise<unknown> {
-    const body: RawSeatPriceRequest = {
-      coCd: "A420",
-      siteNo: show.theaterId,
-      scnsNo: show.screenId,
-      scnYmd: show.date,
-      scnSseq: show.sequence,
-      movNo: show.movieId,
-      rtctlScopCd: RTCTL_SCOPE_WEB,
-      prcrulDivCd: "01",
-      sachlTypCd: "01",
-      prodBnduList: [{ prodBnduCd: "01", prodBnduQty: seats.length }],
-      seatList: seats.map((seat) => ({
-        seatLocNo: seat.seatLocNo,
-        szoneKindCd: "01",
-        stkndCd: "01",
-        seatSalfrmCd: "01",
-        prodBnduCd: "01",
-      })),
-      zoneGroupYn: "N",
-    };
-    return this.http.post("/booking/searchMovAtktSeatPrcList", body);
   }
 
   /**

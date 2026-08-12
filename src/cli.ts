@@ -8,7 +8,7 @@ import { CgvConfirmationRequiredError, CgvError } from "./core/errors.ts";
 import { maskSecret } from "./core/session.ts";
 import { todayInSeoul } from "./mappers/primitives.ts";
 import { renderTable, type Column } from "./cli/table.ts";
-import { parseSeatLocNo, type SeatRef, type ShowKey } from "./resources/seats.ts";
+import type { SeatSpec, ShowKey } from "./resources/seats.ts";
 import type { Movie, ScreenSchedule, Showtime, Theater } from "./types/domain.ts";
 
 interface Args {
@@ -249,13 +249,13 @@ const COMMANDS: Readonly<Record<string, Command>> = {
     run: async (client, args) => {
       requireConfirm(args, "좌석 선점");
       const show = showKeyFrom(args, 0);
-      const seats = parseSeatArgs(required(args, 5, "좌석"), "001");
+      const seats = await client.seats.resolve(show, parseSeatArgs(required(args, 5, "좌석")));
 
       const hold = await client.seats.hold(show, seats);
       process.stdout.write(
         `선점 완료\n  발권번호(movAtktNo): ${hold.movAtktNo}\n` +
           `  만료: ${hold.expiresAt ?? "(응답에서 확인 못함)"}\n` +
-          `  좌석: ${seats.map((s) => `${s.row}${s.number}`).join(", ")}\n\n` +
+          `  좌석: ${seats.map((s) => `${s.row}${s.number}(${s.stkndNm})`).join(", ")}\n\n` +
           `취소하려면: cgv release ${hold.movAtktNo} ${args.positional.slice(0, 6).join(" ")} --confirm\n`,
       );
       if (args.flags["json"] === true) {
@@ -271,7 +271,10 @@ const COMMANDS: Readonly<Record<string, Command>> = {
       requireConfirm(args, "좌석 선점 해제");
       const movAtktNo = required(args, 0, "movAtktNo");
       const show = showKeyFrom(args, 1);
-      const seats = parseSeatArgs(required(args, 6, "좌석"), "001");
+      // 해제 대상은 이미 잡혀 있으므로 판매 여부 검사를 건너뛴다.
+      const seats = await client.seats.resolve(show, parseSeatArgs(required(args, 6, "좌석")), {
+        includeSold: true,
+      });
 
       await client.seats.release({ movAtktNo, expiresAt: null, seats, show, raw: {} });
       process.stdout.write("선점을 해제했습니다.\n");
@@ -325,19 +328,19 @@ const COMMANDS: Readonly<Record<string, Command>> = {
       requireConfirm(args, "결제 개시");
 
       const show = showKeyFrom(args, 0);
-      const seats = parseSeatArgs(required(args, 5, "좌석"), "001");
+      // 결제 대상은 이미 선점된 좌석이므로 판매 여부 검사를 건너뛴다.
+      const seats = await client.seats.resolve(show, parseSeatArgs(required(args, 5, "좌석")), {
+        includeSold: true,
+      });
       const movAtktNo = required(args, 6, "movAtktNo");
-      const seat = seats[0];
-      if (seats.length !== 1 || seat === undefined) {
-        throw new Error("현재 결제는 좌석 1매만 지원합니다.");
-      }
 
       process.stderr.write(
         `\n[확인] ${show.date} ${show.screenId}관 ${show.sequence}회차 / ` +
-          `좌석 ${seat.row}${seat.number}\n결제 절차를 실제로 개시합니다.\n\n`,
+          `좌석 ${seats.map((s) => `${s.row}${s.number}`).join(", ")}\n` +
+          `결제 절차를 실제로 개시합니다.\n\n`,
       );
 
-      const result = await client.checkout.start({ show, seat, movAtktNo });
+      const result = await client.checkout.start({ show, seats, movAtktNo });
       const { ticket } = result;
 
       process.stdout.write(
@@ -411,23 +414,22 @@ function requireConfirm(args: Args, action: string): void {
 }
 
 /** "K8,K9" 또는 "K8@00100100170021" 형식을 SeatRef 로 바꾼다. */
-function parseSeatArgs(spec: string, fallbackArea: string): SeatRef[] {
+/**
+ * 좌석 인자를 해석한다. 'K8' 또는 'K8@00100100170021' 둘 다 받는다.
+ * 실제 좌석 속성(존·좌석종류)은 배치도에서 읽으므로 여기서는 식별자만 뽑는다.
+ */
+function parseSeatArgs(spec: string): SeatSpec[] {
   return spec.split(",").map((token) => {
     const [label, locNo] = token.trim().split("@");
     const matched = /^([A-Za-z]+)\s*(\d+)$/.exec(label ?? "");
     if (matched === null) {
       throw new Error(`좌석 형식이 잘못됐습니다: '${token}' (예: K8 또는 K8@00100100170021)`);
     }
-    const row = (matched[1] ?? "").toUpperCase();
-    const number = matched[2] ?? "";
-    if (locNo === undefined) {
-      throw new Error(
-        `'${label}' 의 seatLocNo 를 알 수 없습니다. ` +
-          `'cgv seatmap' 으로 확인한 뒤 'K8@00100100170021' 형식으로 넘기세요. ` +
-          `(추측으로 좌석을 잠그면 위험하므로 자동 유추하지 않습니다. area=${fallbackArea})`,
-      );
-    }
-    return parseSeatLocNo(locNo, row, number);
+    return {
+      row: (matched[1] ?? "").toUpperCase(),
+      number: matched[2] ?? "",
+      ...(locNo === undefined ? {} : { seatLocNo: locNo }),
+    };
   });
 }
 
