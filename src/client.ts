@@ -13,6 +13,8 @@ import { TheatersResource } from "./resources/theaters.ts";
 import { AuthResource } from "./resources/auth.ts";
 import { SeatsResource } from "./resources/seats.ts";
 import { PaymentResource } from "./resources/payment.ts";
+import { IdentityResource } from "./resources/identity.ts";
+import { CheckoutResource } from "./resources/checkout.ts";
 
 export interface CgvClientOptions {
   /** 일부만 넘겨도 나머지는 DEFAULT_CONFIG 로 채운다. */
@@ -31,6 +33,8 @@ export class CgvClient {
   readonly auth: AuthResource;
   readonly seats: SeatsResource;
   readonly payment: PaymentResource;
+  readonly identity: IdentityResource;
+  readonly checkout: CheckoutResource;
 
   constructor(options: CgvClientOptions = {}) {
     const sessions = options.sessions ?? new FileSessionStore();
@@ -46,5 +50,7 @@ export class CgvClient {
     this.auth = new AuthResource(http, sessions);
     this.seats = new SeatsResource(http, this.auth);
     this.payment = new PaymentResource(http, this.auth);
+    this.identity = new IdentityResource(http, this.auth);
+    this.checkout = new CheckoutResource(http, this.identity, this.payment);
   }
 }

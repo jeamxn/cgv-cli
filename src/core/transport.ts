@@ -167,6 +167,11 @@ export class FetchTransport implements HttpTransport {
     if (session !== null && session !== undefined) parts.push(session.cookie);
     if (parts.length > 0) headers["cookie"] = parts.join("; ");
 
+    // 일부 엔드포인트(member/*, payment/*)는 쿠키만으로는 401 을 준다.
+    // 브라우저도 쿠키의 accessToken 을 읽어 Authorization 헤더로 다시 실어 보낸다.
+    const token = session === null || session === undefined ? null : readAccessToken(session.cookie);
+    if (token !== null) headers["authorization"] = `Bearer ${token}`;
+
     return headers;
   }
 
@@ -185,4 +190,12 @@ export class FetchTransport implements HttpTransport {
   private async backoff(attempt: number): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, this.config.retryDelayMs * attempt));
   }
+}
+
+/** 세션 쿠키 문자열에서 accessToken 값을 꺼낸다. 없으면 null. */
+function readAccessToken(cookie: string): string | null {
+  const match = /(?:^|;\s*)accessToken=([^;]+)/.exec(cookie);
+  const value = match?.[1];
+  if (value === undefined) return null;
+  return decodeURIComponent(value);
 }

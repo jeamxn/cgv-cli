@@ -319,51 +319,31 @@ const COMMANDS: Readonly<Record<string, Command>> = {
 
   checkout: {
     usage:
-      "cgv checkout <극장ID> <금액> <상품명> --user-id <아이디> --user-name <이름> --phone <번호> --confirm",
-    description: "[부수효과] 결제번호 발급 + 토스 결제 예약 → 승인 URL 반환",
+      "cgv checkout <영화ID> <극장ID> <YYYYMMDD> <상영관> <회차> <좌석> <movAtktNo> --confirm",
+    description: "[부수효과] 선점한 좌석으로 결제 개시 → 토스 승인 URL 반환",
     run: async (client, args) => {
       requireConfirm(args, "결제 개시");
 
-      const theaterId = required(args, 0, "극장ID");
-      const amount = Number(required(args, 1, "금액"));
-      if (!Number.isInteger(amount) || amount <= 0) {
-        throw new Error(`금액이 올바르지 않습니다: ${args.positional[1]}`);
-      }
-      const goodsName = required(args, 2, "상품명");
-
-      const userId = args.flags["user-id"];
-      const userName = args.flags["user-name"];
-      const phone = args.flags["phone"];
-      if (typeof userId !== "string" || typeof userName !== "string" || typeof phone !== "string") {
-        throw new Error("--user-id, --user-name, --phone 이 모두 필요합니다.");
+      const show = showKeyFrom(args, 0);
+      const seats = parseSeatArgs(required(args, 5, "좌석"), "001");
+      const movAtktNo = required(args, 6, "movAtktNo");
+      const seat = seats[0];
+      if (seats.length !== 1 || seat === undefined) {
+        throw new Error("현재 결제는 좌석 1매만 지원합니다.");
       }
 
-      const today = todayInSeoul();
       process.stderr.write(
-        `\n[확인] ${goodsName} / ${amount.toLocaleString("ko-KR")}원 / 극장 ${theaterId}\n` +
-          `결제 절차를 실제로 개시합니다.\n\n`,
+        `\n[확인] ${show.date} ${show.screenId}관 ${show.sequence}회차 / ` +
+          `좌석 ${seat.row}${seat.number}\n결제 절차를 실제로 개시합니다.\n\n`,
       );
 
-      const payment = await client.payment.createPaymentId({
-        theaterId,
-        amount,
-        goodsName,
-        goodsCount: 1,
-        userId,
-        userName,
-        saleDate: today,
-      });
-      process.stdout.write(`결제번호: ${payment.paymNo}\n`);
-
-      const ticket = await client.payment.reserveTossPay({
-        payment,
-        amount,
-        userPhone: phone,
-        expireDate: today,
-      });
+      const result = await client.checkout.start({ show, seat, movAtktNo });
+      const { ticket } = result;
 
       process.stdout.write(
-        `PG 거래키: ${ticket.trxKey ?? "(응답에서 못 찾음)"}\n` +
+        `${result.goodsName} / ${result.amount.toLocaleString("ko-KR")}원\n` +
+          `결제번호: ${ticket.payment.paymNo}\n` +
+          `PG 거래키: ${ticket.trxKey ?? "(응답에서 못 찾음)"}\n` +
           `승인 URL: ${ticket.approvalUrl ?? "(응답에서 못 찾음 — --json 으로 원본 확인)"}\n\n` +
           `다음 단계는 자동화할 수 없습니다:\n` +
           `  1) 위 URL 을 브라우저에서 열기\n` +

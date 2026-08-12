@@ -6,6 +6,7 @@
  * 최종 승인 해시(hashValue)는 PG 서버가 생성한다.
  * 따라서 이 리소스가 할 수 있는 최대치는 "결제 URL 생성 + 승인 상태 폴링" 이다.
  */
+import { randomBytes } from "node:crypto";
 import type { HttpTransport } from "../core/transport.ts";
 import type { AuthResource } from "./auth.ts";
 import type {
@@ -41,6 +42,24 @@ export interface PaymentIdentity {
   readonly paymNo: string;
   readonly paymVrifyNo: string;
 }
+
+/**
+ * PG 화면에 노출되는 가맹점 정보. 값이 비어 있으면 토스가 예약을 거부한다.
+ * 실측 캡처에서 그대로 가져온 상수다.
+ */
+const PRODUCT_ITEMS = encodeURIComponent(
+  JSON.stringify({
+    sellerName: "CJ CGV",
+    corpName: "CJ CGV",
+    bizRegNo: "1048145690",
+    corpAddress: "서울특별시 용산구 한강대로 23길 55, 아이파크몰 6층(한강로동)",
+    representativeName: "정종민",
+    representTelNo: "023716660",
+    sellerUrl: "http://www.cgv.co.kr/",
+    subMallKey: "cgv",
+    smallShopGrade: "NORMAL",
+  }),
+);
 
 export interface TossPaymentTicket {
   /** PG 거래키 */
@@ -88,32 +107,50 @@ export class PaymentResource {
    */
   async createPaymentId(input: PaymentPrepareInput): Promise<PaymentIdentity> {
     this.auth.require();
-    const raw = await this.http.post<RawPayId>("/payment/pay/commonGetPayId", {
-      coCd: "A420",
-      siteCode: input.theaterId,
-      mrchClsCd: "1001",
-      sachlTypCd: "01",
-      rvpayYn: "N",
-      amountTotal: input.amount,
-      totpayFee: 0,
-      amountVat: 0,
-      amountTaxFree: 0,
-      amountTax: 0,
-      saleDt: input.saleDate,
-      goodsName: input.goodsName,
-      goodsCnt: String(input.goodsCount),
-      userId: input.userId,
-      userName: input.userName,
-    });
+    const raw = await this.http.post<RawPayId>(
+      "/payment/pay/commonGetPayId",
+      basePayIdBody(input),
+    );
 
-    const paymNo = typeof raw?.paymNo === "string" ? raw.paymNo : "";
-    const paymVrifyNo = typeof raw?.paymVrifyNo === "string" ? raw.paymVrifyNo : "";
-    if (paymNo === "" || paymVrifyNo === "") {
+    // 응답은 payId 하나뿐이고 이것이 곧 paymNo 다.
+    // paymVrifyNo 는 서버가 주지 않는다 — 클라이언트가 만들어 이후 호출에서 일관되게 쓴다.
+    const paymNo = typeof raw?.payId === "string" ? raw.payId : "";
+    if (paymNo === "") {
       throw new Error(
         `결제번호 발급 응답을 해석하지 못했습니다. 응답: ${JSON.stringify(raw).slice(0, 300)}`,
       );
     }
-    return { paymNo, paymVrifyNo };
+    return { paymNo, paymVrifyNo: randomVerifyNo() };
+  }
+
+  /**
+   * ⚠️ 예매 장바구니 전체(paymInfoCont)를 결제번호에 붙여 저장한다.
+   * 좌석과 결제가 여기서 연결된다. 같은 엔드포인트지만 본문 형태가 발급 때와 다르다.
+   */
+  async savePaymentInfo(
+    payment: PaymentIdentity,
+    input: PaymentPrepareInput,
+    paymInfoCont: string,
+  ): Promise<void> {
+    this.auth.require();
+    // 저장 호출도 발급과 같은 필수 필드를 전부 검증한다. 빠뜨리면 400.
+    await this.http.post("/payment/pay/commonGetPayId", {
+      ...basePayIdBody(input),
+      paymNo: payment.paymNo,
+      paymVrifyNo: payment.paymVrifyNo,
+      paymInfoCont,
+    });
+  }
+
+  /** ⚠️ 판매 임시정보 등록. 결제 예약 전에 한 번 호출된다. */
+  async openSaleTemp(payment: PaymentIdentity, paymInfoCont: string): Promise<void> {
+    this.auth.require();
+    await this.http.post("/payment/mpy/proc/insertIssSalProcTempInfo", {
+      coCd: "A420",
+      paymNo: payment.paymNo,
+      paymVrifyNo: payment.paymVrifyNo,
+      paymInfoCont,
+    });
   }
 
   /**
@@ -126,6 +163,8 @@ export class PaymentResource {
     readonly payment: PaymentIdentity;
     readonly amount: number;
     readonly userPhone: string;
+    /** 저장 때 쓴 것과 동일한 판매정보. 갱신 호출에 그대로 다시 필요하다. */
+    readonly paymInfoCont: string;
     /** YYYYMMDD */
     readonly expireDate: string;
     /** PG 가 결제 후 돌아올 CGV 콜백 */
@@ -143,32 +182,43 @@ export class PaymentResource {
     const amountVat = Math.round(args.amount / 11);
     const amountTax = args.amount - amountVat;
 
+    const body = {
+      coCd: "A420",
+      mrchClsCd: "1001",
+      paymNo: args.payment.paymNo,
+      paykndCd: TOSS_PAY.paykndCd,
+      payMethod: TOSS_PAY.payMethod,
+      payMethodCode: "",
+      dcNo: "",
+      amountTotal: args.amount,
+      amountDiscount: 0,
+      amountVat,
+      amountTaxFree: 0,
+      amountTax,
+      redirectUrl,
+      cupDepositAmount: 0,
+      goodsType: "N",
+      cultureType: "Y",
+      userPhone: args.userPhone,
+      expireDate: args.expireDate,
+      appId: "",
+      salitmClsCd: "01",
+      productItems: PRODUCT_ITEMS,
+    };
+
+    // 예약 전후로 판매 임시정보를 갱신한다.
+    // 갱신 쪽은 결제 본문에 더해 검증번호·판매정보까지 요구한다(예약 본문에는 없는 값).
+    const tempBody = {
+      ...body,
+      paymVrifyNo: args.payment.paymVrifyNo,
+      paymInfoCont: args.paymInfoCont,
+    };
+    await this.http.post("/payment/mpy/proc/updateIssSalProcTempInfo", tempBody);
     const raw = await this.http.post<RawAuthReserveResult>(
       "/payment/pay/onlineAuthRequestReserve",
-      {
-        coCd: "A420",
-        mrchClsCd: "1001",
-        paymNo: args.payment.paymNo,
-        paykndCd: TOSS_PAY.paykndCd,
-        payMethod: TOSS_PAY.payMethod,
-        payMethodCode: "",
-        dcNo: "",
-        amountTotal: args.amount,
-        amountDiscount: 0,
-        amountVat,
-        amountTaxFree: 0,
-        amountTax,
-        redirectUrl,
-        cupDepositAmount: 0,
-        goodsType: "N",
-        cultureType: "Y",
-        userPhone: args.userPhone,
-        expireDate: args.expireDate,
-        appId: "",
-        salitmClsCd: "01",
-        productItems: "",
-      },
+      body,
     );
+    await this.http.post("/payment/mpy/proc/updateIssSalProcTempInfo", tempBody);
 
     return {
       trxKey: typeof raw?.trxKey === "string" ? raw.trxKey : null,
@@ -214,10 +264,44 @@ export class PaymentResource {
   }
 }
 
+/** commonGetPayId 가 발급·저장 양쪽에서 공통으로 요구하는 필드. */
+function basePayIdBody(input: PaymentPrepareInput): Record<string, unknown> {
+  return {
+    coCd: "A420",
+    siteCode: input.theaterId,
+    mrchClsCd: "1001",
+    sachlTypCd: "01",
+    rvpayYn: "N",
+    amountTotal: input.amount,
+    totpayFee: 0,
+    amountVat: 0,
+    amountTaxFree: 0,
+    amountTax: 0,
+    saleDt: input.saleDate,
+    goodsName: input.goodsName,
+    goodsCnt: String(input.goodsCount),
+    userId: input.userId,
+    userName: input.userName,
+  };
+}
+
+/**
+ * paymVrifyNo 생성. 실측값은 base62 26자였다(예: w2rxRSyjIpCb7rBK5C3dOIrGhx).
+ * 서버가 형식만 보고 대조는 우리가 보낸 값끼리 하므로 난수로 충분하다.
+ */
+function randomVerifyNo(): string {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  const bytes = randomBytes(26);
+  let out = "";
+  for (const byte of bytes) out += alphabet[byte % alphabet.length];
+  return out;
+}
+
 /** 응답에서 사용자가 열어야 할 URL 을 찾는다. 키 이름이 확정되지 않아 후보를 훑는다. */
 function extractUrl(raw: RawAuthReserveResult | null | undefined): string | null {
   if (raw === null || raw === undefined) return null;
-  for (const key of ["payUrl", "redirectUrl", "authUrl", "onlineUrl"]) {
+  // 실측 응답의 키는 paylinkUrl 이다. 나머지는 방어적으로 남겨둔다.
+  for (const key of ["paylinkUrl", "payUrl", "authUrl", "onlineUrl"]) {
     const value = raw[key];
     if (typeof value === "string" && value.startsWith("http")) return value;
   }

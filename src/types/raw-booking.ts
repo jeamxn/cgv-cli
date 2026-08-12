@@ -141,8 +141,8 @@ export interface RawPayIdRequest {
 
 /** POST /payment/pay/commonGetPayId 응답 */
 export interface RawPayId {
-  readonly paymNo?: string;
-  readonly paymVrifyNo?: string;
+  /** 발급된 결제번호. 이 값이 이후 호출의 paymNo 가 된다. */
+  readonly payId?: string;
   readonly [key: string]: unknown;
 }
 
