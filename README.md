@@ -11,7 +11,17 @@ pnpm install
 pnpm build         # dist/ 생성
 ```
 
-Node 20 이상 + pnpm 필요 (런타임 의존성은 없고 내장 `fetch` 만 쓴다).
+## Node 버전
+
+런타임 의존성은 없고 내장 `fetch` 만 쓴다.
+
+| 용도 | 필요 버전 | 이유 |
+|---|---|---|
+| 빌드 결과물 실행 (`node dist/cli.js`), `pnpm cli` | **Node 20+** | `fetch`, `Headers.getSetCookie()` |
+| 소스 직접 실행 (`pnpm dev`, `pnpm example`) | **Node 22.6+** | `--experimental-strip-types` |
+
+`.nvmrc` 가 있으니 `nvm use` 로 맞추면 전부 동작한다. Node 20 에서 `pnpm dev` 를 돌리면
+`node: bad option: --experimental-strip-types` 가 난다 — 이때는 `pnpm cli` 를 쓰면 된다.
 
 ## 라이브러리
 
@@ -54,11 +64,14 @@ await cgv.schedules.isBookable({ ...query, screenId: "002", sequence: "3" });
 ## CLI
 
 ```bash
-# 빌드 없이 (Node 네이티브 TS 실행)
+# 어느 Node 든 동작 (매번 빌드 후 실행)
 pnpm cli seats 오디세이 용산아이파크몰 20260812
 
-# 빌드 후
+# 이미 빌드했다면 (가장 빠름)
 node dist/cli.js seats 오디세이 용산아이파크몰
+
+# 개발용 빠른 루프 (Node 22.6+)
+pnpm dev seats 오디세이 용산아이파크몰
 ```
 
 | 명령 | 설명 |
