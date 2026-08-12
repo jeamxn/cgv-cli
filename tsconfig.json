@@ -1,0 +1,30 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "types": ["node"],
+
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "verbatimModuleSyntax": true,
+
+    // Node 의 네이티브 TS 실행(--experimental-strip-types)은 확장자 있는 상대경로를 요구하고,
+    // tsc 빌드 결과물은 .js 여야 한다. 두 요구를 동시에 만족시키는 조합.
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true,
+
+    "outDir": "dist",
+    "rootDir": "src",
+    "declaration": true,
+    "sourceMap": true,
+    "skipLibCheck": true
+  },
+  // 빌드 대상은 src 만. examples 는 Node 네이티브 TS 실행으로 돌리고
+  // 타입 검사만 tsconfig.check.json 에서 한다.
+  "include": ["src/**/*.ts"]
+}

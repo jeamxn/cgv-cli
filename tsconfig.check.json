@@ -1,0 +1,10 @@
+{
+  // 타입 검사 전용. examples 까지 포함해서 검사하되 산출물은 만들지 않는다.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    // examples 가 src 밖에 있으므로 검사 시에는 루트를 프로젝트 전체로 넓힌다.
+    "rootDir": "."
+  },
+  "include": ["src/**/*.ts", "examples/**/*.ts"]
+}
