@@ -1,2 +1,11 @@
 node_modules/
 dist/
+
+# 로그인 세션·쿠키·캡처 덤프는 개인정보다. 절대 커밋하지 않는다.
+session.json
+*.session.json
+.cgv-cli/
+cookies.txt
+*.har
+card.json
+cgv.json

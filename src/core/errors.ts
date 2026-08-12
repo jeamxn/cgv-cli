@@ -42,6 +42,25 @@ export class CgvApiError extends CgvError {
   }
 }
 
+/** 로그인 세션이 없거나 만료됐다. */
+export class CgvAuthError extends CgvError {
+  constructor(message: string) {
+    super(message);
+  }
+}
+
+/**
+ * 부수효과(좌석 잠금·결제 예약)를 확인 없이 실행하려 했다.
+ * 실수로 돈이 나가거나 좌석이 묶이는 것을 막는 장치다.
+ */
+export class CgvConfirmationRequiredError extends CgvError {
+  constructor(action: string) {
+    super(
+      `'${action}' 는 실제 부수효과가 있는 작업입니다. 진행하려면 --confirm 을 붙이세요.`,
+    );
+  }
+}
+
 /** 재시도를 소진한 네트워크/타임아웃 오류, 또는 예상치 못한 HTTP 상태. */
 export class CgvNetworkError extends CgvError {
   readonly url: string;
